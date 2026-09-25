@@ -63,6 +63,7 @@ def main() -> None:
     data_dir.mkdir(exist_ok=True)
     html = (ROOT / "web" / "index.html").read_bytes()
     (data_dir / "index.html.gz").write_bytes(gzip.compress(html, compresslevel=9, mtime=0))
+    shutil.copy2(ROOT / "web" / "favicon.svg", data_dir / "favicon.svg")
 
     run(args.platformio, "run", "-e", "esp8285", "-t", "buildfs", cwd=source)
     output = ROOT / "dist"
@@ -71,7 +72,8 @@ def main() -> None:
     run(args.platformio, "run", "-e", "esp8285", cwd=source)
     shutil.copy2(source / ".pioenvs" / "esp8285" / "firmware.bin", output / "firmware.bin")
     shutil.copy2(data_dir / "index.html.gz", output / "index.html.gz")
-    for name in ("firmware.bin", "littlefs.bin", "index.html.gz"):
+    shutil.copy2(data_dir / "favicon.svg", output / "favicon.svg")
+    for name in ("firmware.bin", "littlefs.bin", "index.html.gz", "favicon.svg"):
         path = output / name
         print(f"{name}: {path.stat().st_size} bytes, SHA-256 {sha256(path)}")
 

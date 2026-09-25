@@ -22,8 +22,6 @@ def main() -> None:
     parser.add_argument("--keep-legacy", action="store_true", help="Do not remove old tool/camera pages")
     args = parser.parse_args()
     base = f"http://{args.host.strip('/')}"
-    image = ROOT / "dist" / "index.html.gz"
-    payload = image.read_bytes()
     session = requests.Session()
 
     response = session.get(f"{base}/files", params={"path": "/"}, timeout=20)
@@ -33,23 +31,29 @@ def main() -> None:
         raise SystemExit(f"LittleFS unavailable: {info.get('status')}")
     print(f"LittleFS: {info.get('used')} / {info.get('total')}")
 
-    response = session.post(
-        f"{base}/files",
-        data={"path": "/", "index.html.gzS": str(len(payload))},
-        files={"myfiles": ("index.html.gz", payload, "application/gzip")},
-        timeout=90,
-    )
-    response.raise_for_status()
-    uploaded = response.json()
-    if "failed" in str(uploaded.get("status", "")).lower() or "error" in str(uploaded.get("status", "")).lower():
-        raise SystemExit(f"Upload failed: {uploaded.get('status')}")
+    for image, content_type in (
+        (ROOT / "dist" / "index.html.gz", "application/gzip"),
+        (ROOT / "dist" / "favicon.svg", "image/svg+xml"),
+    ):
+        payload = image.read_bytes()
+        response = session.post(
+            f"{base}/files",
+            data={"path": "/", f"{image.name}S": str(len(payload))},
+            files={"myfiles": (image.name, payload, content_type)},
+            timeout=90,
+        )
+        response.raise_for_status()
+        uploaded = response.json()
+        status = str(uploaded.get("status", "")).lower()
+        if "failed" in status or "error" in status:
+            raise SystemExit(f"Upload failed: {uploaded.get('status')}")
 
-    response = session.get(f"{base}/index.html.gz", timeout=20)
-    response.raise_for_status()
-    actual = response.content
-    if hashlib.sha256(actual).digest() != hashlib.sha256(payload).digest():
-        raise SystemExit("Verification failed: the stored page differs from the build")
-    print(f"New WebUI verified: {len(actual)} bytes")
+        response = session.get(f"{base}/{image.name}", timeout=20)
+        response.raise_for_status()
+        actual = response.content
+        if hashlib.sha256(actual).digest() != hashlib.sha256(payload).digest():
+            raise SystemExit(f"Verification failed: stored {image.name} differs from the build")
+        print(f"Verified {image.name}: {len(actual)} bytes")
 
     if not args.keep_legacy:
         for name in ("tool.html", "esp32cam.html"):
@@ -67,7 +71,7 @@ def main() -> None:
 
     response = session.get(f"{base}/", timeout=20)
     response.raise_for_status()
-    if b"SD Wi" not in response.content or b"page-files" not in response.content:
+    if b"SD Wi" not in response.content or b"page-files" not in response.content or b"favicon.svg" not in response.content:
         raise SystemExit("Root page did not serve the new WebUI")
     print(f"Installed at {base}/")
 
