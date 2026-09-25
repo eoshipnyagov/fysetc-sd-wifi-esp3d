@@ -1,0 +1,516 @@
+diff --git a/esp3d/configuration.h b/esp3d/configuration.h
+index 12948a5..a5e068e 100644
+--- a/esp3d/configuration.h
++++ b/esp3d/configuration.h
+@@ -193,11 +193,12 @@
+ /* Use Websocket server
+  * Enable websocket communications
+  */
+-#define WS_DATA_FEATURE
++// No printer terminal on FYSETC SD-WiFi: its UART goes to the USB adapter.
++// #define WS_DATA_FEATURE
+ 
+ // Enable notifications
+ // Allows to send notifications to the user
+-#define NOTIFICATION_FEATURE
++// #define NOTIFICATION_FEATURE
+ 
+ /* Notification message when online
+  * The message that will be sent when the ESP is online
+@@ -300,14 +301,17 @@
+  * ESP_SHARED_SD //Printer SD Card is also connected to ESP3D
+  * Does your system has SD card and how it is connected to your ESP3D
+  */
+- //#define SD_DEVICE_CONNECTION ESP_NOT_SHARED_SD
++ #define SD_DEVICE_CONNECTION ESP_SHARED_SD
+ 
+ /* SD card library
+  * ESP_SD_NATIVE //esp32 / esp8266
+  * ESP_SDIO      //esp32 only
+  * ESP_SDFAT2    //esp8266  / esp32
+  */
+- //#define SD_DEVICE ESP_SDFAT2
++ #define SD_DEVICE ESP_SD_NATIVE
++
++// FYSETC SD-WiFi V2.1, ESP8285H16 with 2 MB embedded flash.
++#define FYSETC_SD_WIFI_V21
+ 
+ 
+ // #define SD_CARD_TYPE ESP_FYSETC_WIFI_PRO_SDCARD
+@@ -353,7 +357,8 @@
+ /* SD card CS pin
+  * The pin used to select SD card in SPI mode
+  */
+- //#define ESP_SD_CS_PIN 21
++ #define ESP_SD_CS_PIN 4
++ #define ESP_SD_CS_SENSE 5
+  //#define ESP_SD_MISO_PIN 8
+  //#define ESP_SD_MOSI_PIN 9
+  //#define ESP_SD_SCK_PIN  7
+@@ -380,7 +385,7 @@
+  * FS_FLASH       //mount Flash FS
+  * FS_SD          mount SD FS
+  */
+-//#define WEBDAV_FEATURE FS_ROOT
++#define WEBDAV_FEATURE FS_SD
+ 
+ /* FTP access
+  * Use FTP to access to your filesystem (1 connection only)
+@@ -595,7 +600,7 @@
+ /* Enable direct control pin
+  * Controls pins using [ESP201]
+  */
+-#define DIRECT_PIN_FEATURE
++// #define DIRECT_PIN_FEATURE
+ 
+ /************************************
+  *
+@@ -621,18 +626,18 @@
+  * Commands to run on event
+  * Separate commands with ';'
+  */
+-#define ESP_GOT_IP_HOOK "[ESP212]IP:%ESP_IP%"
++// #define ESP_GOT_IP_HOOK "[ESP212]IP:%ESP_IP%"
+ 
+ /* Hook when got date time
+  * Commands to run on event
+  * Separate commands with ';'
+  */
+-#define ESP_GOT_DATE_TIME_HOOK "[ESP212]DATE:%ESP_DATETIME%"
++// #define ESP_GOT_DATE_TIME_HOOK "[ESP212]DATE:%ESP_DATETIME%"
+ 
+ /* Gcode Host Feature
+  * This feature allows to process Gcode files like macros.
+  */
+-#define GCODE_HOST_FEATURE
++// #define GCODE_HOST_FEATURE
+ 
+ /* Settings location
+  * SETTINGS_IN_EEPROM //ESP8266/ESP32
+@@ -705,4 +710,4 @@
+ #undef NOTIFICATION_FEATURE
+ #endif
+ 
+-#endif  //_CONFIGURATION_H
+\ No newline at end of file
++#endif  //_CONFIGURATION_H
+diff --git a/esp3d/src/core/commands/ESP420.cpp b/esp3d/src/core/commands/ESP420.cpp
+index c6f9599..21304ec 100644
+--- a/esp3d/src/core/commands/ESP420.cpp
++++ b/esp3d/src/core/commands/ESP420.cpp
+@@ -796,13 +796,15 @@ void ESP3DCommands::ESP420(int cmd_params_pos, ESP3DMessage* msg) {
+                                                              : "none ";
+   tmpstr += "(";
+   tmpstr += ESP_SD::FilesystemName();
+-  if (SD_DEVICE  == ESP_SDIO){
++#if SD_DEVICE == ESP_SDIO
++  {
+     if(SDIO_BIT_MODE == SD_ONE_BIT_MODE) {
+       tmpstr += " 1-bit";
+     } else {
+       tmpstr += " 4-bit";
+     }
+   }
++#endif
+   tmpstr += ")";
+   if (!dispatchIdValue(json, "sd", tmpstr.c_str(), target, requestId, false)) {
+     return;
+diff --git a/esp3d/src/core/esp3d_hal.h b/esp3d/src/core/esp3d_hal.h
+index da59ea0..673c493 100644
+--- a/esp3d/src/core/esp3d_hal.h
++++ b/esp3d/src/core/esp3d_hal.h
+@@ -61,7 +61,7 @@ class ESP3DHal {
+ 
+ class Esp3dTimout {
+  public:
+-  Esp3dTimout(uint64_t timeout) { _start = millis(); };
++  Esp3dTimout(uint64_t timeout) : _start(millis()), _timeout(timeout) {};
+   void reset() { _start = millis(); };
+   bool isTimeout() { return (millis() - _start > _timeout); };
+   uint64_t getTimeout() { return _timeout; };
+diff --git a/esp3d/src/modules/filesystem/esp_sd.cpp b/esp3d/src/modules/filesystem/esp_sd.cpp
+index b970b5e..c433e8e 100644
+--- a/esp3d/src/modules/filesystem/esp_sd.cpp
++++ b/esp3d/src/modules/filesystem/esp_sd.cpp
+@@ -41,6 +41,160 @@ static constexpr uint32_t SD_WATCHDOG_MS = 300000UL;  // 5 min
+ 
+ #if SD_DEVICE_CONNECTION == ESP_SHARED_SD
+ 
++#if defined(FYSETC_SD_WIFI_V21) && defined(ARDUINO_ARCH_ESP8266)
++#include <ESP8266WiFi.h>
++#include <SPI.h>
++#include "../../core/esp3d_settings.h"
++static volatile uint32_t fysetcPrinterBusyUntil = 0;
++static void IRAM_ATTR fysetcPrinterCSFalling() {
++  if (!ESP_SD::isEnabled()) fysetcPrinterBusyUntil = millis() + 20000UL;
++}
++
++void fysetcInitializeSharedSD() {
++  pinMode(ESP_SD_CS_SENSE, INPUT);
++  fysetcPrinterBusyUntil = millis() + 20000UL;
++  attachInterrupt(digitalPinToInterrupt(ESP_SD_CS_SENSE),
++                  fysetcPrinterCSFalling, FALLING);
++}
++
++static bool fysetcIsManagedMarker(const String& name) {
++  String upper = name;
++  upper.toUpperCase();
++  if (upper.startsWith("PW_") && upper.endsWith(".GCO") &&
++      upper.length() > 7) {
++    return true;
++  }
++  if ((!upper.startsWith("IP_") && !upper.startsWith("AP_")) ||
++      !upper.endsWith(".GCO")) {
++    return false;
++  }
++  uint8_t octets = 1;
++  uint8_t digits = 0;
++  uint16_t value = 0;
++  for (size_t i = 3; i < upper.length() - 4; ++i) {
++    const char c = upper[i];
++    if (c == '.') {
++      if (digits == 0 || value > 255 || octets == 4) return false;
++      ++octets;
++      digits = 0;
++      value = 0;
++    } else if (c >= '0' && c <= '9') {
++      ++digits;
++      value = value * 10 + c - '0';
++      if (digits > 3 || value > 255) return false;
++    } else {
++      return false;
++    }
++  }
++  return octets == 4 && digits != 0 && value <= 255;
++}
++
++static String fysetcPasswordMarker(const String& password) {
++  static const char hex[] = "0123456789ABCDEF";
++  String name = "PW_";
++  for (size_t i = 0; i < password.length(); ++i) {
++    const uint8_t c = static_cast<uint8_t>(password[i]);
++    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
++        (c >= '0' && c <= '9') || c == '_' || c == '-') {
++      name += static_cast<char>(c);
++    } else {
++      name += '~';
++      name += hex[c >> 4];
++      name += hex[c & 0x0F];
++    }
++  }
++  name += ".GCO";
++  return name;
++}
++
++static bool fysetcEnsureEmptyMarker(const String& name) {
++  if (name.length() == 0) return true;
++  const String path = String("/") + name;
++  if (ESP_SD::exists(path.c_str())) {
++    ESP_SDFile existing = ESP_SD::open(path.c_str(), ESP_FILE_READ);
++    const bool valid = existing.isOpen() && existing.size() == 0;
++    existing.close();
++    return valid;
++  }
++  ESP_SDFile created = ESP_SD::open(path.c_str(), ESP_FILE_WRITE);
++  const bool valid = created.isOpen();
++  created.close();
++  return valid;
++}
++
++static void fysetcUpdateIPMarker() {
++  static uint32_t nextAttempt = 0;
++  static String appliedMarker;
++  static String appliedPasswordMarker;
++  if (static_cast<int32_t>(millis() - nextAttempt) < 0) return;
++  nextAttempt = millis() + 1000UL;
++
++  const auto mode = WiFi.getMode();
++  IPAddress ip;
++  if (mode == WIFI_STA && WiFi.isConnected()) {
++    ip = WiFi.localIP();
++  } else if (mode == WIFI_AP) {
++    ip = WiFi.softAPIP();
++  } else {
++    return;
++  }
++  if (static_cast<uint32_t>(ip) == 0) return;
++  const String marker = String(mode == WIFI_AP ? "AP_" : "IP_") +
++                        ip.toString() + ".GCO";
++  const String password = mode == WIFI_AP
++                              ? ESP3DSettings::readString(ESP_AP_PASSWORD)
++                              : String();
++  const String passwordMarker = password.length() > 0
++                                    ? fysetcPasswordMarker(password)
++                                    : String();
++  if (marker == appliedMarker && passwordMarker == appliedPasswordMarker) return;
++  if (!ESP_SD::accessFS()) {
++    nextAttempt = millis() + 5000UL;
++    return;
++  }
++
++  bool success = true;
++  // Only zero-byte files matching our exact marker pattern are removed.
++  for (uint8_t pass = 0; pass < 16; ++pass) {
++    String oldMarker;
++    ESP_SDFile root = ESP_SD::open("/", ESP_FILE_READ);
++    if (!root.isOpen()) {
++      success = false;
++      break;
++    }
++    ESP_SDFile entry = root.openNextFile();
++    while (entry) {
++      const String name = entry.name();
++      if (!entry.isDirectory() && entry.size() == 0 &&
++          name != marker && name != passwordMarker &&
++          fysetcIsManagedMarker(name)) {
++        oldMarker = name;
++        entry.close();
++        break;
++      }
++      entry.close();
++      entry = root.openNextFile();
++    }
++    root.close();
++    if (oldMarker.length() == 0) break;
++    if (!ESP_SD::remove((String("/") + oldMarker).c_str())) {
++      success = false;
++      break;
++    }
++  }
++
++  if (success) success = fysetcEnsureEmptyMarker(marker);
++  if (success) success = fysetcEnsureEmptyMarker(passwordMarker);
++  ESP_SD::releaseFS();
++  if (success) {
++    appliedMarker = marker;
++    appliedPasswordMarker = passwordMarker;
++  } else {
++    nextAttempt = millis() + 5000UL;
++  }
++}
++#endif
++
+ #if SD_CARD_TYPE == ESP_FYSETC_WIFI_PRO_SDCARD
+ #include <SPI.h>
+ #endif  // SD_CARD_TYPE == ESP_FYSETC_WIFI_PRO_SDCARD
+@@ -51,6 +205,12 @@ bool ESP_SD::enableSharedSD() {
+     esp3d_log("Already enabled, skip");
+     return false;
+   }
++#if defined(FYSETC_SD_WIFI_V21) && defined(ARDUINO_ARCH_ESP8266)
++  if (static_cast<int32_t>(millis() - fysetcPrinterBusyUntil) < 0) {
++    esp3d_log("Printer recently used SD; skip");
++    return false;
++  }
++#endif
+ #if defined(ESP_SD_CS_SENSE) && ESP_SD_CS_SENSE != -1
+   if (!digitalRead(ESP_SD_CS_SENSE)) {
+     esp3d_log("SD CS is active, skip");
+@@ -81,12 +241,24 @@ bool ESP_SD::enableSharedSD() {
+             ESP_SD_MISO_PIN, ESP_SD_MOSI_PIN, ESP_SD_SCK_PIN);
+   SPI.begin(ESP_SD_SCK_PIN, ESP_SD_MISO_PIN, ESP_SD_MOSI_PIN, ESP_SD_CS_PIN);
+ #endif  // SD_CARD_TYPE == ESP_FYSETC_WIFI_PRO_SDCARD
++#if defined(FYSETC_SD_WIFI_V21) && defined(ARDUINO_ARCH_ESP8266)
++  SPI.begin();
++  pinMode(ESP_SD_CS_PIN, OUTPUT);
++  digitalWrite(ESP_SD_CS_PIN, HIGH);
++#endif
+ 
+   _enabled = true;
+   return true;
+ }
+ 
+ bool ESP_SD::disableSharedSD() {
++#if defined(FYSETC_SD_WIFI_V21) && defined(ARDUINO_ARCH_ESP8266)
++  SPI.end();
++  pinMode(12, INPUT);
++  pinMode(13, INPUT);
++  pinMode(14, INPUT);
++  pinMode(ESP_SD_CS_PIN, INPUT);
++#endif
+ #if SD_CARD_TYPE == ESP_FYSETC_WIFI_PRO_SDCARD
+   // Release SPI pins so the MCU bus driver can take over cleanly
+   pinMode(ESP_SD_CS_PIN, INPUT_PULLUP);
+@@ -162,10 +334,10 @@ void ESP_SD::releaseFS(uint8_t FS) {
+   esp3d_log("Release SD");
+ #if SD_DEVICE_CONNECTION == ESP_SHARED_SD
+   if (_enabled) {
+-    _enabled = false;
+     if (ESP_SD::disableSharedSD()) {
+       esp3d_log("Shared SD disabled");
+     }
++    _enabled = false;
+     // Notify MCU firmware that the bus is restored so it can remount
+     if (_mcuRemountCallback) {
+       _mcuRemountCallback();
+@@ -181,6 +353,9 @@ void ESP_SD::handle() {
+     esp3d_log_e("SD watchdog: forced release after inactivity timeout");
+     releaseFS();
+   }
++#if defined(FYSETC_SD_WIFI_V21) && defined(ARDUINO_ARCH_ESP8266)
++  fysetcUpdateIPMarker();
++#endif
+ }
+ 
+ ESP_SDFile::ESP_SDFile(const char* name, const char* filename, bool isdir,
+diff --git a/esp3d/src/modules/filesystem/sd/sd_native_esp8266.cpp b/esp3d/src/modules/filesystem/sd/sd_native_esp8266.cpp
+index 7084bd1..2b39faa 100644
+--- a/esp3d/src/modules/filesystem/sd/sd_native_esp8266.cpp
++++ b/esp3d/src/modules/filesystem/sd/sd_native_esp8266.cpp
+@@ -25,6 +25,10 @@ sd_native_esp8266.cpp - ESP3D sd support class
+ #include "../../../core/esp3d_settings.h"
+ #include "../esp_sd.h"
+ 
++#if defined(FYSETC_SD_WIFI_V21)
++void fysetcInitializeSharedSD();
++#endif
++
+ ESP3D_SD_Class ESP3D_SD_Card;
+ ESP3D_File tSDFile_handle[ESP_MAX_SD_OPENHANDLE];
+ 
+@@ -92,6 +96,9 @@ uint8_t ESP_SD::getState(bool refresh) {
+ bool ESP_SD::begin() {
+   _started = true;
+   _state = ESP_SDCARD_NOT_PRESENT;
++#if defined(FYSETC_SD_WIFI_V21)
++  fysetcInitializeSharedSD();
++#endif
+   _spi_speed_divider = ESP3DSettings::readByte(ESP_SD_SPEED_DIV);
+   // sanity check
+   if (_spi_speed_divider <= 0) {
+@@ -187,6 +194,7 @@ ESP_SDFile ESP_SD::open(const char* path, uint8_t mode) {
+  ESP3D_File tmp = ESP3D_SD_Card.open(path, (mode == ESP_FILE_READ)    ? FILE_READ
+                            : (mode == ESP_FILE_WRITE) ? FILE_WRITE
+                                                       : FILE_WRITE);
++  if (!tmp) return ESP_SDFile();
+   ESP_SDFile esptmp(&tmp, tmp.isDirectory(),
+                     (mode == ESP_FILE_READ) ? false : true, path);
+   return esptmp;
+diff --git a/esp3d/src/modules/http/handlers/handle-SD-files.cpp b/esp3d/src/modules/http/handlers/handle-SD-files.cpp
+index cf3461f..9df21b1 100644
+--- a/esp3d/src/modules/http/handlers/handle-SD-files.cpp
++++ b/esp3d/src/modules/http/handlers/handle-SD-files.cpp
+@@ -155,7 +155,9 @@ void HTTP_Server::handleSDFileList() {
+     }
+     // force refresh
+     if (_webserver->arg("action") == "list") {
++#if !defined(FYSETC_SD_WIFI_V21)
+       ESP_SD::refreshStats(true);
++#endif
+     }
+   }
+   String buffer2send;
+diff --git a/esp3d/src/modules/http/handlers/handle-command.cpp b/esp3d/src/modules/http/handlers/handle-command.cpp
+index 580694b..d20a8d1 100644
+--- a/esp3d/src/modules/http/handlers/handle-command.cpp
++++ b/esp3d/src/modules/http/handlers/handle-command.cpp
+@@ -86,6 +86,12 @@ void HTTP_Server::handle_web_command() {
+         esp3d_log_e("Cannot create message");
+       }
+     } else {
++#if defined(FYSETC_SD_WIFI_V21)
++      // The printer's SD slot has no UART connection to this board.
++      // Reject forwarded G-code instead of reporting false success.
++      HTTP_Server::set_http_headers();
++      _webserver->send(400, "text/plain", "Printer UART is not connected");
++#else
+       HTTP_Server::set_http_headers();
+       // the command is not ESP3D so it will be forwarded to the output client
+       // no need to wait to answer then
+@@ -93,6 +99,7 @@ void HTTP_Server::handle_web_command() {
+       esp3d_commands.dispatch(cmd.c_str(), esp3d_commands.getOutputClient(),
+                               no_id, isRealTimeCommand ? ESP3DMessageType::realtimecmd :ESP3DMessageType::unique,
+                               ESP3DClientType::http, auth_level);
++#endif
+     }
+   } else if (_webserver->hasArg("ping")) {
+     _webserver->send(200);
+diff --git a/esp3d/src/modules/http/handlers/upload-SD-files.cpp b/esp3d/src/modules/http/handlers/upload-SD-files.cpp
+index affbfd1..d87d29b 100644
+--- a/esp3d/src/modules/http/handlers/upload-SD-files.cpp
++++ b/esp3d/src/modules/http/handlers/upload-SD-files.cpp
+@@ -64,7 +64,9 @@ void HTTP_Server::SDFileupload() {
+ #endif  // ESP3DLIB_ENV && COMMUNICATION_PROTOCOL == SOCKET_SERIAL
+         // Upload start
+       if (upload.status == UPLOAD_FILE_START) {
++#ifdef WS_DATA_FEATURE
+         last_WS_update = millis();
++#endif
+ #ifdef ESP_BENCHMARK_FEATURE
+         bench_start = millis();
+         bench_transfered = 0;
+@@ -160,10 +162,12 @@ void HTTP_Server::SDFileupload() {
+           bench_transfered += upload.currentSize;
+ #endif  // ESP_BENCHMARK_FEATURE
+         // update websocket every 2000 ms
++#ifdef WS_DATA_FEATURE
+           if (millis() - last_WS_update > 2000) {
+             websocket_terminal_server.handle();
+             last_WS_update = millis();
+           }
++#endif
+           // no error so write post date
+           int writeddatanb = fsUploadFile.write(upload.buf, upload.currentSize);
+           if (upload.currentSize != (size_t)writeddatanb) {
+diff --git a/esp3d/src/modules/webdav/handlers/handler_put.cpp b/esp3d/src/modules/webdav/handlers/handler_put.cpp
+index 106c6c7..5ea989a 100644
+--- a/esp3d/src/modules/webdav/handlers/handler_put.cpp
++++ b/esp3d/src/modules/webdav/handlers/handler_put.cpp
+@@ -119,9 +119,23 @@ void WebdavServer::handler_put(const char* url) {
+ #if defined(HTTP_FEATURE)
+           Esp3dTimout updateWS(2000);
+ #endif  // HTTP_FEATURE
+-          while (_client.available() && received < content_length) {
++          uint32_t lastPayloadAt = millis();
++          while (received < content_length) {
+             ESP3DHal::wait(0);
+-            size_t received_bytes = _client.read(chunk, sizeof(chunk));
++            size_t available = _client.available();
++            if (available == 0) {
++              if (!_client.connected() || millis() - lastPayloadAt > 15000UL) {
++                break;
++              }
++              ESP3DHal::wait(1);
++              continue;
++            }
++            size_t toRead = available < sizeof(chunk) ? available : sizeof(chunk);
++            size_t remaining = content_length - received;
++            if (toRead > remaining) toRead = remaining;
++            size_t received_bytes = _client.read(chunk, toRead);
++            if (received_bytes == 0) continue;
++            lastPayloadAt = millis();
+             if (received_bytes != file.write(chunk, received_bytes)) {
+               code = 500;
+               esp3d_log_e("Failed to write %s", url);
+diff --git a/platformio.ini b/platformio.ini
+index 9ab2b28..6ab7d6e 100644
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -13,7 +13,7 @@ src_dir     = esp3d
+ build_dir   = .pioenvs
+ lib_dir     = libraries
+ libdeps_dir = .piolibdeps
+-data_dir = esp3d/data
++data_dir = esp3d/data-sdwifi
+ default_envs = esp32dev
+ 
+ 
+@@ -346,6 +346,9 @@ lib_ignore =
+ [env:esp8285]
+ platform = espressif8266@4.1.0
+ board = esp8285
++board_upload.flash_size = 2MB
++board_upload.maximum_size = 1835008
++board_build.filesystem = littlefs
+ framework = arduino
+ monitor_speed = 115200
+ monitor_echo = yes
+@@ -356,7 +359,7 @@ board_build.f_cpu = 160000000L
+ board_build.f_flash = 40000000L
+ board_build.flash_mode = dout 
+ upload_resetmethod = ck
+-board_build.ldscript = eagle.flash.1m256.ld
++board_build.ldscript = eagle.flash.2m256.ld
+ build_flags = 
+     -D PIO_FRAMEWORK_ARDUINO_LWIP2_LOW_MEMORY
+     -DNONOSDK221=1
