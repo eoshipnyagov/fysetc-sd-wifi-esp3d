@@ -47,12 +47,18 @@ def main() -> None:
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     if commit != UPSTREAM_COMMIT:
         raise SystemExit(f"Expected ESP3D {UPSTREAM_COMMIT}, got {commit}")
-    status = subprocess.check_output(["git", "status", "--porcelain"], cwd=source, text=True).strip()
-    if status:
-        raise SystemExit("ESP3D source must be clean before applying the patch")
-
-    run("git", "apply", "--check", str(ROOT / "firmware" / "esp3d-3.1.patch"), cwd=source)
-    run("git", "apply", str(ROOT / "firmware" / "esp3d-3.1.patch"), cwd=source)
+    patch = ROOT / "firmware" / "esp3d-3.1.patch"
+    status = subprocess.check_output(["git", "status", "--porcelain"], cwd=source, text=True).splitlines()
+    already_patched = subprocess.run(
+        ["git", "apply", "--reverse", "--check", str(patch)], cwd=source
+    ).returncode == 0
+    expected_generated = {"?? esp3d/data-sdwifi/"}
+    unexpected = [line for line in status if line not in expected_generated]
+    if unexpected and not already_patched:
+        raise SystemExit("ESP3D source contains unexpected local changes")
+    if not already_patched:
+        run("git", "apply", "--check", str(patch), cwd=source)
+        run("git", "apply", str(patch), cwd=source)
     data_dir = source / "esp3d" / "data-sdwifi"
     data_dir.mkdir(exist_ok=True)
     html = (ROOT / "web" / "index.html").read_bytes()
