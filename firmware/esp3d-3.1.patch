@@ -115,6 +115,203 @@ index c6f9599..21304ec 100644
    tmpstr += ")";
    if (!dispatchIdValue(json, "sd", tmpstr.c_str(), target, requestId, false)) {
      return;
+diff --git a/esp3d/src/core/esp3d_commands.cpp b/esp3d/src/core/esp3d_commands.cpp
+index bc6bd5a..ba1cbbc 100644
+--- a/esp3d/src/core/esp3d_commands.cpp
++++ b/esp3d/src/core/esp3d_commands.cpp
+@@ -135,6 +135,168 @@ bool ESP3DCommands::is_esp_command(uint8_t *sbuf, size_t len) {
+   return false;
+ }
+ 
++#if defined(FYSETC_SD_WIFI_V21)
++static String friendly_line(const ESP3DMessage *msg) {
++  String line;
++  if (!msg) return line;
++  line.reserve(msg->size);
++  for (size_t i = 0; i < msg->size; ++i) {
++    const char c = static_cast<char>(msg->data[i]);
++    if (c != '\r' && c != '\n' && c != '\0') line += c;
++  }
++  line.trim();
++  return line;
++}
++
++static String friendly_escape(const String &value) {
++  String escaped;
++  escaped.reserve(value.length() * 2);
++  for (size_t i = 0; i < value.length(); ++i) {
++    const char c = value[i];
++    if (c == '\\' || c == ' ') escaped += '\\';
++    escaped += c;
++  }
++  return escaped;
++}
++
++static bool friendly_reply(ESP3DMessage *msg, const char *text) {
++  msg->target = msg->origin;
++  msg->origin = ESP3DClientType::command;
++  msg->type = ESP3DMessageType::unique;
++  return esp3d_commands.dispatch(msg, text);
++}
++
++static bool friendly_replace_and_process(ESP3DMessage *msg, const String &cmd) {
++  if (!esp3d_message_manager.setDataContent(msg, (const uint8_t *)cmd.c_str(),
++                                             cmd.length())) {
++    esp3d_message_manager.deleteMsg(msg);
++    return true;
++  }
++  esp3d_commands.process(msg);
++  return true;
++}
++
++static bool handle_friendly_command(ESP3DMessage *msg) {
++  const String line = friendly_line(msg);
++  String lower = line;
++  lower.toLowerCase();
++  if (lower == "help") {
++    return friendly_reply(
++        msg,
++        "SD WiFi console\n"
++        "help\n"
++        "status | version | restart\n"
++        "wifi show | wifi scan\n"
++        "wifi mode sta|ap\n"
++        "wifi sta ssid <name>\n"
++        "wifi sta password <password>\n"
++        "wifi ap ssid <name>\n"
++        "wifi ap password <password>\n"
++        "wifi fallback ap|off\n"
++        "webdav show|on|off|port <1-65535>\n"
++        "sd status | sd ls [path]\n"
++        "sd exists|mkdir|rm|rmdir|touch <path>\n"
++        "Changes to WiFi settings need restart\n");
++  }
++  if (lower == "status") return friendly_replace_and_process(msg, "[ESP420]");
++  if (lower == "version") return friendly_replace_and_process(msg, "[ESP800]");
++  if (lower == "restart")
++    return friendly_replace_and_process(msg, "[ESP444]RESTART");
++  if (lower == "wifi show") return friendly_replace_and_process(msg, "[ESP420]");
++  if (lower == "wifi scan") return friendly_replace_and_process(msg, "[ESP410]");
++  if (lower == "wifi mode sta")
++    return friendly_replace_and_process(msg, "[ESP110]WIFI-STA");
++  if (lower == "wifi mode ap")
++    return friendly_replace_and_process(msg, "[ESP110]WIFI-AP");
++  if (lower == "wifi fallback ap")
++    return friendly_replace_and_process(msg, "[ESP104]SETUP");
++  if (lower == "wifi fallback off")
++    return friendly_replace_and_process(msg, "[ESP104]OFF");
++
++  const char *wifi_prefixes[][2] = {
++      {"wifi sta ssid ", "[ESP100]"},
++      {"wifi sta password ", "[ESP101]"},
++      {"wifi ap ssid ", "[ESP105]"},
++      {"wifi ap password ", "[ESP106]"},
++  };
++  for (const auto &item : wifi_prefixes) {
++    const String prefix = item[0];
++    if (lower.startsWith(prefix)) {
++      String value = line.substring(prefix.length());
++      value.trim();
++      if (value.length() == 0) return friendly_reply(msg, "Value is required\n");
++      return friendly_replace_and_process(msg, String(item[1]) + friendly_escape(value));
++    }
++  }
++
++  if (lower == "webdav show") return friendly_replace_and_process(msg, "[ESP190]");
++  if (lower == "webdav on") return friendly_replace_and_process(msg, "[ESP190]ON");
++  if (lower == "webdav off") return friendly_replace_and_process(msg, "[ESP190]OFF");
++  const String dav_prefix = "webdav port ";
++  if (lower.startsWith(dav_prefix)) {
++    String value = line.substring(dav_prefix.length());
++    value.trim();
++    const long port = value.toInt();
++    if (port < 1 || port > 65535 || String(port) != value) {
++      return friendly_reply(msg, "Port must be 1..65535\n");
++    }
++    return friendly_replace_and_process(msg, String("[ESP191]") + value);
++  }
++
++  if (lower == "sd status") return friendly_replace_and_process(msg, "[ESP200]");
++  const String ls_prefix = "sd ls";
++  if (lower == ls_prefix || lower.startsWith(ls_prefix + " ")) {
++    String path = line.substring(ls_prefix.length());
++    path.trim();
++    if (path.length() == 0) path = "/";
++    return friendly_replace_and_process(msg, "[ESP740]" + friendly_escape(path));
++  }
++  const char *sd_prefixes[][2] = {
++      {"sd exists ", "exists="}, {"sd mkdir ", "mkdir="},
++      {"sd rm ", "remove="},       {"sd rmdir ", "rmdir="},
++      {"sd touch ", "create="},
++  };
++  for (const auto &item : sd_prefixes) {
++    const String prefix = item[0];
++    if (lower.startsWith(prefix)) {
++      String path = line.substring(prefix.length());
++      path.trim();
++      if (path.length() == 0 || !path.startsWith("/")) {
++        return friendly_reply(msg, "Path must start with /\n");
++      }
++      return friendly_replace_and_process(msg,
++                                          String("[ESP750]") + item[1] + friendly_escape(path));
++    }
++  }
++
++  if (lower.startsWith("wifi") || lower.startsWith("webdav") ||
++      lower.startsWith("sd ")) {
++    return friendly_reply(msg, "Unknown command. Type help\n");
++  }
++  return false;
++}
++#endif  // FYSETC_SD_WIFI_V21
++
++bool ESP3DCommands::is_friendly_command(uint8_t *sbuf, size_t len) {
++#if defined(FYSETC_SD_WIFI_V21)
++  String line;
++  line.reserve(len);
++  for (size_t i = 0; i < len; ++i) {
++    const char c = static_cast<char>(sbuf[i]);
++    if (c != '\r' && c != '\n' && c != '\0') line += c;
++  }
++  line.trim();
++  line.toLowerCase();
++  return line == "help" || line == "status" || line == "version" ||
++         line == "restart" || line.startsWith("wifi") ||
++         line.startsWith("webdav") || line.startsWith("sd ");
++#else
++  (void)sbuf;
++  (void)len;
++  return false;
++#endif
++}
++
+ const char *ESP3DCommands::format_response(uint cmdID, bool isjson, bool isok,
+                                            const char *message) {
+   static String res;
+@@ -1173,6 +1335,11 @@ void ESP3DCommands::process(ESP3DMessage *msg) {
+     return;
+   }
+   esp3d_log("Processing message %d", msg->size);
++#if defined(FYSETC_SD_WIFI_V21)
++  if (!is_esp_command(msg->data, msg->size) && handle_friendly_command(msg)) {
++    return;
++  }
++#endif
+   if (is_esp_command(msg->data, msg->size)) {
+     esp3d_log("Detected ESP command");
+     lastIsESP3D = true;
+diff --git a/esp3d/src/core/esp3d_commands.h b/esp3d/src/core/esp3d_commands.h
+index 3925b95..4a59295 100644
+--- a/esp3d/src/core/esp3d_commands.h
++++ b/esp3d/src/core/esp3d_commands.h
+@@ -32,6 +32,7 @@ class ESP3DCommands {
+   void process(ESP3DMessage* msg);
+ 
+   bool is_esp_command(uint8_t* sbuf, size_t len);
++  bool is_friendly_command(uint8_t* sbuf, size_t len);
+ 
+   void execute_internal_command(int cmd, int cmd_params_pos, ESP3DMessage* msg);
+ 
 diff --git a/esp3d/src/core/esp3d_hal.h b/esp3d/src/core/esp3d_hal.h
 index da59ea0..673c493 100644
 --- a/esp3d/src/core/esp3d_hal.h
@@ -401,10 +598,20 @@ index cf3461f..9df21b1 100644
    }
    String buffer2send;
 diff --git a/esp3d/src/modules/http/handlers/handle-command.cpp b/esp3d/src/modules/http/handlers/handle-command.cpp
-index 580694b..d20a8d1 100644
+index 580694b..d36120d 100644
 --- a/esp3d/src/modules/http/handlers/handle-command.cpp
 +++ b/esp3d/src/modules/http/handlers/handle-command.cpp
-@@ -86,6 +86,12 @@ void HTTP_Server::handle_web_command() {
+@@ -73,7 +73,8 @@ void HTTP_Server::handle_web_command() {
+       esp3d_log("Command is ending with \\n");
+     }
+     esp3d_log("Message type is %s for %s", isRealTimeCommand ? "realtimecmd" : "unique", cmd.c_str());
+-    if (esp3d_commands.is_esp_command((uint8_t *)cmd.c_str(), cmd.length())) {
++    if (esp3d_commands.is_esp_command((uint8_t *)cmd.c_str(), cmd.length()) ||
++        esp3d_commands.is_friendly_command((uint8_t *)cmd.c_str(), cmd.length())) {
+       ESP3DMessage *msg = esp3d_message_manager.newMsg(
+           ESP3DClientType::http, esp3d_commands.getOutputClient(),
+           (uint8_t *)cmd.c_str(), cmd.length(), auth_level);
+@@ -86,6 +87,12 @@ void HTTP_Server::handle_web_command() {
          esp3d_log_e("Cannot create message");
        }
      } else {
@@ -417,7 +624,7 @@ index 580694b..d20a8d1 100644
        HTTP_Server::set_http_headers();
        // the command is not ESP3D so it will be forwarded to the output client
        // no need to wait to answer then
-@@ -93,6 +99,7 @@ void HTTP_Server::handle_web_command() {
+@@ -93,6 +100,7 @@ void HTTP_Server::handle_web_command() {
        esp3d_commands.dispatch(cmd.c_str(), esp3d_commands.getOutputClient(),
                                no_id, isRealTimeCommand ? ESP3DMessageType::realtimecmd :ESP3DMessageType::unique,
                                ESP3DClientType::http, auth_level);

@@ -44,6 +44,43 @@ python scripts\install_webui.py 192.168.1.123
 
 WebDAV использует порт `8181` по умолчанию: `http://<IP-платы>:8181/`. Текущий адрес платы можно увидеть в меню принтера по имени пустого файла `IP_*.GCO` или `AP_*.GCO`.
 
+## Консоль
+
+При подключении платы к USB в режиме `USB2UART` откройте COM-порт на скорости **115200 бод**. Команды вводятся обычным текстом; `help` выводит тот же список прямо с платы.
+
+```text
+help
+status
+version
+restart
+
+wifi show
+wifi scan
+wifi mode sta
+wifi mode ap
+wifi sta ssid MyNetwork
+wifi sta password MyPassword
+wifi ap ssid ESP3D
+wifi ap password NewPassword
+wifi fallback ap
+wifi fallback off
+
+webdav show
+webdav on
+webdav off
+webdav port 8181
+
+sd status
+sd ls /
+sd exists /file.gcode
+sd mkdir /models
+sd touch /empty.gcode
+sd rm /old.gcode
+sd rmdir /empty-folder
+```
+
+После изменения Wi‑Fi выполните `restart`. Имена сетей и пароли с пробелами поддерживаются. Путь к файлу SD всегда начинается с `/`. Форматирование SD и сброс настроек намеренно не имеют коротких команд; при необходимости доступны только через старый технический синтаксис ESP3D. Старые команды `[ESP…]` продолжают работать для совместимости с веб-панелью.
+
 ## Ручная сборка из исходников
 
 Нужны Git, Python 3.9+ и PlatformIO CLI. Скрипт скачивает точно указанный коммит ESP3D, применяет патч, сжимает `web/index.html` и собирает образы:
