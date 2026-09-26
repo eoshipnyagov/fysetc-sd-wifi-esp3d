@@ -300,6 +300,17 @@ index bc6bd5a..ba1cbbc 100644
    if (is_esp_command(msg->data, msg->size)) {
      esp3d_log("Detected ESP command");
      lastIsESP3D = true;
+diff --git a/esp3d/src/core/esp3d_string.cpp b/esp3d/src/core/esp3d_string.cpp
+--- a/esp3d/src/core/esp3d_string.cpp
++++ b/esp3d/src/core/esp3d_string.cpp
+@@ -140,5 +140,7 @@ const char* esp3d_string::getContentType(const char* filename) {
+   } else if (file_name.endsWith(".ico")) {
+     return "image/x-icon";
++  } else if (file_name.endsWith(".svg")) {
++    return "image/svg+xml";
+   } else if (file_name.endsWith(".xml")) {
+     return "text/xml";
+   } else if (file_name.endsWith(".pdf")) {
 diff --git a/esp3d/src/core/esp3d_commands.h b/esp3d/src/core/esp3d_commands.h
 index 3925b95..4a59295 100644
 --- a/esp3d/src/core/esp3d_commands.h
